@@ -1,0 +1,17 @@
+# OCI credentials — NEVER commit these
+.oci/
+*.pem
+*.key
+
+# Logs and runtime artifacts (regenerated each run)
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Local data that should not be in git
+data/uom_conversions.yaml.bak

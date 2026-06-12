@@ -1,0 +1,11 @@
+# Managed by uom_converter.py and the 'UOM Conversions' UI page.
+# sold_qty = ordered_qty <operator> factor   (operator: * / + -)
+# customer / part_number may be '*' to match anything.
+
+conversions:
+- part_number: FG-201
+  uom_ordered: CS
+  uom_sold: EA
+  operator: '*'
+  factor: 10
+  customer: Walkswagen

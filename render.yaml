@@ -1,0 +1,67 @@
+services:
+  - type: web
+    name: po2so-app
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    envVars:
+      # ── OCI Object Storage ──────────────────────────────────────────────────
+      - key: OCI_NAMESPACE
+        sync: false          # fill in Render dashboard
+      - key: OCI_BUCKET_NAME
+        sync: false
+      - key: OCI_REGION
+        sync: false
+      - key: OCI_INPUT_FOLDER
+        value: POPDFS/
+      - key: OCI_PROCESSED_FOLDER
+        value: processed/
+      - key: OCI_ERROR_FOLDER
+        value: error/
+      # OCI auth — paste the 5 lines from ~/.oci/config as individual vars
+      - key: OCI_CONFIG_PATH
+        value: /etc/oci/config     # written by build script below
+      - key: OCI_PROFILE
+        value: DEFAULT
+
+      # ── OCI Generative AI ───────────────────────────────────────────────────
+      - key: OCI_COMPARTMENT_ID
+        sync: false
+      - key: OCI_GENAI_ENDPOINT
+        value: https://inference.generativeai.us-chicago-1.oci.oraclecloud.com
+      - key: OCI_GENAI_MODEL_ID
+        value: google.gemini-2.5-pro
+
+      # ── Oracle Fusion (BIP + SO API) ────────────────────────────────────────
+      - key: ORACLE_BASE_URL
+        sync: false
+      - key: ORACLE_USERNAME
+        sync: false
+      - key: ORACLE_PASSWORD
+        sync: false
+      - key: BIP_REPORT_PATH
+        sync: false
+      - key: BIP_XREF_REPORT_PATH
+        sync: false
+      - key: BIP_ADDRESS_REPORT_PATH
+        sync: false
+
+      # ── Sales Order settings ────────────────────────────────────────────────
+      - key: SO_SOURCE_SYSTEM
+        value: OPS
+      - key: SO_SUBMITTED_FLAG
+        value: "false"
+      - key: SO_ATTACHMENT_MODE
+        value: url
+
+      # ── OIC trigger ─────────────────────────────────────────────────────────
+      - key: OIC_TRIGGER_URL
+        sync: false
+      - key: OIC_USERNAME
+        sync: false
+      - key: OIC_PASSWORD
+        sync: false
+      - key: OIC_ERROR_TRIGGER_URL
+        sync: false
+      - key: OIC_ENABLED
+        value: "true"
