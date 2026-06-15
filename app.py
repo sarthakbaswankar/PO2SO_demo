@@ -939,45 +939,18 @@ elif st.session_state.page == "batch_summary":
     for col, label in zip(h, ["File", "Status", "Order", "Customer", ""]):
         col.markdown(f"**{label}**")
 
-    row_idx = 0
-    for r in records:
-        sub_results = r.get("sub_results") or []
-        if sub_results:
-            # Multi-PO record: expand into one row per sub-result so each SO
-            # appears separately in the table instead of as a combined row.
-            for sub in sub_results:
-                cols = st.columns([3, 1.4, 2, 2, 1.4])
-                po_num = sub.get("po_number") or "—"
-                cols[0].write(f"{r.get('file', '')}  ·  PO {po_num}")
-                cols[1].markdown(status_badge(bool(sub.get("success"))), unsafe_allow_html=True)
-                cols[2].write(sub.get("order_key") or "—")
-                cols[3].write(r.get("customer_name") or "—")
-                if sub.get("success"):
-                    # Build a synthetic detail record from this sub-result + parent context
-                    if cols[4].button("View", key=f"batch_view_{row_idx}"):
-                        detail = {**r, **sub,
-                                  "transaction_number": po_num,
-                                  "order_key": sub.get("order_key"),
-                                  "sub_results": None}  # single-card view for this PO
-                        st.session_state.detail_record = detail
-                        go_to_page("order_details")
-                else:
-                    cols[4].write("")
-                row_idx += 1
+    for idx, r in enumerate(records):
+        cols = st.columns([3, 1.4, 2, 2, 1.4])
+        cols[0].write(r.get("file", ""))
+        cols[1].markdown(status_badge(bool(r.get("success"))), unsafe_allow_html=True)
+        cols[2].write(r.get("order_key") or "—")
+        cols[3].write(r.get("customer_name") or "—")
+        if r.get("success"):
+            if cols[4].button("View", key=f"batch_view_{idx}"):
+                st.session_state.detail_record = r
+                go_to_page("order_details")
         else:
-            # Single-PO record: original one-row behaviour.
-            cols = st.columns([3, 1.4, 2, 2, 1.4])
-            cols[0].write(r.get("file", ""))
-            cols[1].markdown(status_badge(bool(r.get("success"))), unsafe_allow_html=True)
-            cols[2].write(r.get("order_key") or "—")
-            cols[3].write(r.get("customer_name") or "—")
-            if r.get("success"):
-                if cols[4].button("View", key=f"batch_view_{row_idx}"):
-                    st.session_state.detail_record = r
-                    go_to_page("order_details")
-            else:
-                cols[4].write("")
-            row_idx += 1
+            cols[4].write("")
 
     failed_records = [r for r in records if not r.get("success")]
     if failed_records:
@@ -1030,91 +1003,50 @@ elif st.session_state.page == "order_details":
         if st.button("Back to home"):
             reset_app()
     else:
-        sub_results = rec.get("sub_results") or []
-        is_multi = bool(sub_results)
+        order_key = rec.get("order_key") or "—"
+        st.markdown(
+            f"""
+            <div class="card-header">
+              <h2>Order: {order_key} &nbsp; {confidence_badge(rec.get('confidence'))}</h2>
+              <div class="sub">Header ID: {rec.get('header_id') or '—'} &nbsp;|&nbsp;
+                   Currency: {rec.get('currency_code') or 'USD'} &nbsp;|&nbsp; Status: Draft</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f'<div class="field-label">Customer</div>'
+                        f'<div class="field-value">{rec.get("customer_name") or "—"}</div>',
+                        unsafe_allow_html=True)
+            st.markdown('<div class="field-label">Order Type</div>'
+                        '<div class="field-value">Standard Sales Order</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="field-label">Source Document</div>'
+                        f'<div class="field-value">{rec.get("file") or "—"}</div>',
+                        unsafe_allow_html=True)
+        with col2:
+            st.markdown(f'<div class="field-label">Business Unit</div>'
+                        f'<div class="field-value">{rec.get("business_unit_name") or "—"}</div>',
+                        unsafe_allow_html=True)
+            st.markdown(f'<div class="field-label">PO Number</div>'
+                        f'<div class="field-value">{rec.get("transaction_number") or "—"}</div>',
+                        unsafe_allow_html=True)
+            st.markdown(f'<div class="field-label">Processed</div>'
+                        f'<div class="field-value">{rec.get("timestamp") or "—"}</div>',
+                        unsafe_allow_html=True)
 
-        # ── Helper: render one SO card (used for both single and each sub-PO) ─
-        def _render_so_card(r: dict, idx: int, total: int, shared_rec: dict) -> None:
-            """Render header + fields + lines for one Sales Order."""
-            order_key = r.get("order_key") or "—"
-            po_num    = r.get("po_number") or r.get("transaction_number") or "—"
-            status    = r.get("status", "success")
-            hdr_id    = r.get("header_id") or shared_rec.get("header_id") or "—"
-            currency  = shared_rec.get("currency_code") or "USD"
-
-            if total > 1:
-                st.markdown(f"### Sales Order {idx} of {total}")
-
-            badge = confidence_badge(shared_rec.get("confidence")) if idx == 1 else ""
-            st.markdown(
-                f"""
-                <div class="card-header">
-                  <h2>Order: {order_key} &nbsp; {badge}</h2>
-                  <div class="sub">Header ID: {hdr_id} &nbsp;|&nbsp;
-                       Currency: {currency} &nbsp;|&nbsp; Status: Draft</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(
-                    f'<div class="field-label">Customer</div>'
-                    f'<div class="field-value">{shared_rec.get("customer_name") or "—"}</div>',
-                    unsafe_allow_html=True)
-                st.markdown('<div class="field-label">Order Type</div>'
-                            '<div class="field-value">Standard Sales Order</div>',
-                            unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="field-label">Source Document</div>'
-                    f'<div class="field-value">{shared_rec.get("file") or "—"}</div>',
-                    unsafe_allow_html=True)
-            with col2:
-                st.markdown(
-                    f'<div class="field-label">Business Unit</div>'
-                    f'<div class="field-value">{shared_rec.get("business_unit_name") or "—"}</div>',
-                    unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="field-label">PO Number</div>'
-                    f'<div class="field-value">{po_num}</div>',
-                    unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="field-label">Processed</div>'
-                    f'<div class="field-value">{shared_rec.get("timestamp") or "—"}</div>',
-                    unsafe_allow_html=True)
-
-            # Status badge for failed sub-orders in a multi-PO batch
-            if status == "error":
-                st.error(f"❌ This PO failed: {r.get('error') or 'Unknown error'}")
-            elif status == "duplicate":
-                st.warning(f"⚠️ Duplicate: {r.get('error') or ''}")
-
-            st.markdown("#### Order lines")
-            lines = r.get("lines") or []
-            if lines:
-                st.table({
-                    "Line":     [str(ln.get("SourceTransactionLineNumber", "")) for ln in lines],
-                    "Product":  [str(ln.get("ProductNumber", "")) for ln in lines],
-                    "Quantity": [str(ln.get("OrderedQuantity", "")) for ln in lines],
-                    "UOM":      [str(ln.get("OrderedUOMCode", "")) for ln in lines],
-                })
-            else:
-                st.info("No line items were captured for this PO.")
-
-        # ── Multi-PO: banner + one card per sub-result ────────────────────────
-        if is_multi:
-            total = len(sub_results)
-            st.info(f"📦 This PDF contained **{total} Purchase Orders**. "
-                    f"Each created its own Sales Order in Oracle.")
-            for i, sub in enumerate(sub_results, start=1):
-                _render_so_card(sub, i, total, rec)
-                if i < total:
-                    st.markdown("---")
+        st.markdown("#### Order lines")
+        lines = rec.get("lines") or []
+        if lines:
+            st.table({
+                "Line":     [str(ln.get("SourceTransactionLineNumber", "")) for ln in lines],
+                "Product":  [str(ln.get("ProductNumber", "")) for ln in lines],
+                "Quantity": [str(ln.get("OrderedQuantity", "")) for ln in lines],
+                "UOM":      [str(ln.get("OrderedUOMCode", "")) for ln in lines],
+            })
         else:
-            # ── Single-PO: original behaviour ─────────────────────────────────
-            _render_so_card(rec, 1, 1, rec)
+            st.info("No line items were captured in the extraction.")
 
-        # ── Shared source PDF attachment (one link for the whole batch) ───────
         if rec.get("par_url"):
             st.markdown("#### Attached source PDF")
             st.markdown(f"[Open source PO PDF]({rec['par_url']})")
@@ -1282,6 +1214,55 @@ elif st.session_state.page == "records":
 
                 # ── SUCCESS — read-only ─────────────────────────────────────
                 if status == "success":
+                    # MULTI-PO: one PDF produced several Sales Orders. Show each
+                    # created order separately instead of collapsing to one.
+                    subs = r.get("sub_results") or []
+                    created = [s for s in subs if s.get("success")]
+                    failed = [s for s in subs if not s.get("success")]
+                    if len(subs) > 1 or len(created) > 1 or (r.get("order_keys") and len(r.get("order_keys")) > 1):
+                        st.success(f"✅  {len(created)} Sales Orders created from this PDF"
+                                   + (f"  ·  {len(failed)} failed" if failed else ""))
+                        for s in created:
+                            with st.container(border=True):
+                                st.markdown(f"**PO {s.get('po_number') or '—'}**")
+                                m = st.columns(3)
+                                m[0].markdown('<div class="field-label">Order Key</div>'
+                                              f'<div class="field-value">{s.get("order_key") or "—"}</div>',
+                                              unsafe_allow_html=True)
+                                m[1].markdown('<div class="field-label">Header ID</div>'
+                                              f'<div class="field-value">{s.get("header_id") or "—"}</div>',
+                                              unsafe_allow_html=True)
+                                m[2].markdown('<div class="field-label">Ship-to</div>'
+                                              f'<div class="field-value">{s.get("ship_to_address") or "—"}</div>',
+                                              unsafe_allow_html=True)
+                                s_lines = s.get("lines") or []
+                                if s_lines:
+                                    st.table({
+                                        "Customer Item": [str(ln.get("CustomerItemNumber") or "—") for ln in s_lines],
+                                        "Product":     [str(ln.get("ProductNumber", "")) for ln in s_lines],
+                                        "Description": [str(ln.get("ProductDescription") or "—") for ln in s_lines],
+                                        "Quantity":    [str(ln.get("OrderedQuantity", "")) for ln in s_lines],
+                                        "UOM":         [str(ln.get("OrderedUOMCode", "")) for ln in s_lines],
+                                    })
+                                s_pl, s_api = s.get("payload"), s.get("api_response")
+                                if s_api:
+                                    with st.expander("Final API response"):
+                                        st.json(s_api)
+                                if s_pl:
+                                    with st.expander("Payload sent to Oracle"):
+                                        st.json(s_pl)
+                        for s in failed:
+                            st.error(f"PO {s.get('po_number')} failed: "
+                                     f"{s.get('api_error_raw') or s.get('error') or 'unknown error'}")
+                        _lf = r.get("log_file")
+                        if _lf:
+                            with st.expander("Per-file processing log"):
+                                try:
+                                    st.code(open(_lf, encoding="utf-8").read()[-8000:])
+                                except OSError as exc:
+                                    st.caption(f"Could not read log file: {exc}")
+                        continue
+
                     pl = r.get("payload") or {}
                     bd = r.get("bi_data") or {}
                     api = r.get("api_response") or {}
@@ -1369,35 +1350,31 @@ elif st.session_state.page == "records":
                         st.warning(f"**What went wrong / what to fix:** {simplified}")
                     else:
                         st.warning(f"**Reason:** {r.get('error') or 'Unknown error.'}")
-
-                    # Raw Oracle API error — always visible so the actual rejection
-                    # message from Oracle is never hidden behind the simplified text.
+                        # The stored record has no simplified message (it predates the
+                        # simplifier, or the earlier GenAI call failed). Offer to
+                        # generate the suggestion on demand so it's always reachable.
+                        sugg_key = f"sugg_{idx}"
+                        if st.session_state.get(sugg_key):
+                            st.info(f"💡 **Suggested fix:** {st.session_state[sugg_key]}")
+                        elif raw_err and st.button("💡  Suggest a fix (AI)", key=f"do_sugg_{idx}"):
+                            with st.spinner("Asking Gemini to explain the error…"):
+                                txt = ""
+                                try:
+                                    from extractor import PDFExtractor
+                                    txt = PDFExtractor(settings.genai).simplify_error(
+                                        raw_err,
+                                        context={"PO Number": r.get("transaction_number"),
+                                                 "Customer": r.get("customer_name")},
+                                    )
+                                except Exception as exc:
+                                    log.warning("On-demand simplify failed: %s", exc)
+                            if txt:
+                                st.session_state[sugg_key] = txt
+                                st.rerun()
+                            else:
+                                st.caption("Couldn't generate a suggestion (GenAI unavailable).")
                     with st.expander("Raw error from Oracle API"):
                         st.code(raw_err or "—")
-
-                    # AI "Suggest a fix" button — available whether or not a
-                    # simplified message was already generated (it may be stale or
-                    # incomplete for multi-PO batches).
-                    sugg_key = f"sugg_{idx}"
-                    if st.session_state.get(sugg_key):
-                        st.info(f"💡 **Suggested fix:** {st.session_state[sugg_key]}")
-                    elif raw_err and st.button("💡  Suggest a fix (AI)", key=f"do_sugg_{idx}"):
-                        with st.spinner("Asking Gemini to explain the error…"):
-                            txt = ""
-                            try:
-                                from extractor import PDFExtractor
-                                txt = PDFExtractor(settings.genai).simplify_error(
-                                    raw_err,
-                                    context={"PO Number": r.get("transaction_number"),
-                                             "Customer": r.get("customer_name")},
-                                )
-                            except Exception as exc:
-                                log.warning("On-demand simplify failed: %s", exc)
-                        if txt:
-                            st.session_state[sugg_key] = txt
-                            st.rerun()
-                        else:
-                            st.caption("Couldn't generate a suggestion (GenAI unavailable).")
 
                     # Read-only context — same enrichment fields as success rows.
                     # (Often "—" on early failures where BIP/payload never ran.)

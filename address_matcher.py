@@ -158,6 +158,18 @@ def _tokens(text: str) -> set[str]:
     return {t for t in (text or "").split() if t}
 
 
+def _strip_tokens(norm_text: str, noise: set[str] | None) -> str:
+    """Drop whole noise tokens (e.g. the customer name) from already-normalised
+    text. The PDF ship-to line often starts with the customer name or "Ship To"
+    boilerplate (e.g. "ford site 01 monticello") which isn't in the on-file
+    address; removing it lets the real address match."""
+    if not noise:
+        return norm_text
+    kept = [t for t in norm_text.split() if t not in noise]
+    # If stripping removed everything, keep the original so we don't lose all signal.
+    return " ".join(kept) if kept else norm_text
+
+
 def _similar(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
@@ -276,7 +288,7 @@ class _Score:
 
 
 def _score_candidate(pdf_addr: dict[str, Any], cand: AddressCandidate,
-                     idf: dict[str, float]) -> _Score:
+                     idf: dict[str, float], noise: set[str] | None = None) -> _Score:
     """Return a 0..1 confidence that this candidate is the PDF's address.
 
     HARD FAILS (confidence forced to 0) - these mean "definitely a different
@@ -285,9 +297,12 @@ def _score_candidate(pdf_addr: dict[str, Any], cand: AddressCandidate,
       * Building/plot NUMBERS present on both sides but disjoint (12 vs 47).
     Otherwise the score is driven by the distinguishing-token similarity of the
     building/street ("core"), nudged up when postal and city/state also agree.
+
+    `noise` tokens (e.g. the customer name) are removed from both sides first so
+    a customer name embedded in the PDF address doesn't break the match.
     """
-    pdf_core = _norm(_pdf_core(pdf_addr))
-    cand_core = _norm(cand.core_text())
+    pdf_core = _strip_tokens(_norm(_pdf_core(pdf_addr)), noise)
+    cand_core = _strip_tokens(_norm(cand.core_text()), noise)
 
     pdf_city = _norm(pdf_addr.get("City"))
     pdf_state = _norm(pdf_addr.get("State"))
@@ -311,7 +326,8 @@ def _score_candidate(pdf_addr: dict[str, Any], cand: AddressCandidate,
         base = 0.6 * wj + 0.4 * seq
     else:
         # No usable street/building text on one side - fall back to full text.
-        base = _similar(_norm(pdf_address_text(pdf_addr)), _norm(cand.full_text()))
+        base = _similar(_strip_tokens(_norm(pdf_address_text(pdf_addr)), noise),
+                        _strip_tokens(_norm(cand.full_text()), noise))
 
     # -- BOOSTS: agreement on postal / city / state adds a little confidence -
     conf = base
@@ -333,6 +349,7 @@ def match_ship_to_address(
     candidates: list[AddressCandidate],
     genai_match_fn: Callable[[str, list[AddressCandidate]], int | None] | None = None,
     genai_validate_fn: Callable[[str, AddressCandidate], bool | None] | None = None,
+    customer_name: str | None = None,
 ) -> MatchResult:
     """Resolve the PDF ship-to address to one BI-report candidate.
 
@@ -340,10 +357,19 @@ def match_ship_to_address(
     `genai_validate_fn(pdf_text, candidate) -> bool|None`: AI confirms a pick is
         truly the same physical place. Used before any non-obvious accept AND
         before failing, so the AI is a validator, not just a tiebreaker.
+    `customer_name`: stripped out of the address text before comparison, because
+        PDFs often prefix the ship-to with the customer name / "Ship To" wording
+        (e.g. "Ford, Site 01, ...") which isn't in the on-file address.
     """
     pdf_addr = pdf_addr or {}
     pdf_text = pdf_address_text(pdf_addr)
     cands = list(candidates or [])
+
+    # Noise tokens removed from BOTH sides before scoring: the customer name plus
+    # a little common ship-to boilerplate. (Gates on city/state/postal are NOT
+    # affected — those fields don't carry the customer name.)
+    noise: set[str] = set(_norm(customer_name).split()) if customer_name else set()
+    noise |= {"shipto", "ship", "to", "deliver", "delivery", "attn", "attention"}
 
     # STEP 0 - nothing on file -> cannot match.
     if not cands:
@@ -382,8 +408,8 @@ def match_ship_to_address(
                      pdf_postal, len(cands))
 
     # STEP 2 - score every candidate (structured gate + weighted content).
-    idf = _build_idf([_norm(c.core_text()) for c in work])
-    scored = [(c, _score_candidate(pdf_addr, c, idf)) for c in work]
+    idf = _build_idf([_strip_tokens(_norm(c.core_text()), noise) for c in work])
+    scored = [(c, _score_candidate(pdf_addr, c, idf, noise)) for c in work]
     survivors = sorted([(c, s) for c, s in scored if not s.hard_fail],
                        key=lambda x: x[1].confidence, reverse=True)
     for c, s in scored:

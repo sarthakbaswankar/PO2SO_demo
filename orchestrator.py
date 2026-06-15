@@ -137,6 +137,7 @@ class POAutomationOrchestrator:
             pdf_addr, candidates,
             genai_match_fn=self.extractor.match_address_via_ai,       # AI picks
             genai_validate_fn=self.extractor.validate_address_via_ai,  # AI confirms
+            customer_name=po.get("CustomerName"),                      # stripped as noise
         )
         if result.matched and result.candidate:
             ids = result.candidate.to_ids()
@@ -470,9 +471,17 @@ class POAutomationOrchestrator:
             "po_number": r.get("po_number"), "success": r.get("success"),
             "status": r.get("status"), "order_key": r.get("order_key"),
             "header_id": r.get("header_id"), "error": r.get("error"),
+            "api_error_raw": r.get("api_error_raw"),
+            "api_error_simplified": r.get("api_error_simplified"),
+            "customer_name": r.get("customer_name"),
+            "business_unit_name": r.get("business_unit_name"),
+            "currency_code": r.get("currency_code"),
             "ship_to_address": r.get("ship_to_address"),
             "ship_to_match_method": r.get("ship_to_match_method"),
             "lines": r.get("lines"),
+            "payload": r.get("payload"),
+            "api_response": r.get("api_response"),
+            "bi_data": r.get("bi_data"),
         } for r in sub]
 
         elapsed = (time.perf_counter() - t_start) * 1000.0
@@ -481,24 +490,23 @@ class POAutomationOrchestrator:
             combined_lines.extend(r.get("lines") or [])
 
         status = "success" if all_success else ("error" if not any_success else "error")
+        # Surface the REAL Oracle error (raw response body), not just "HTTP 400".
+        def _real_err(r: dict) -> str:
+            return (r.get("api_error_raw") or r.get("error") or "").strip()
+
         summary_err = None
-        # Collect raw Oracle API error bodies from every failed sub-result so the
-        # UI can show the real Oracle rejection message (not just the HTTP status).
-        raw_parts = [
-            f"PO {r.get('po_number')}: {r.get('api_error_raw') or r.get('error') or 'unknown error'}"
-            for r in sub if not r.get("success")
-        ]
-        simplified_parts = [
-            f"PO {r.get('po_number')}: {r.get('api_error_simplified')}"
-            for r in sub if not r.get("success") and r.get("api_error_simplified")
-        ]
-        combined_api_error_raw = "\n\n---\n\n".join(raw_parts) if raw_parts else None
-        combined_api_error_simplified = "\n".join(simplified_parts) if simplified_parts else None
+        combined_raw = None
+        combined_simpl = None
         if not all_success:
-            summary_err = (f"{len(created_keys)}/{len(pos)} Sales Orders created. "
-                           "Failed: " + "; ".join(
-                               f"{r.get('po_number')} ({r.get('error')})"
-                               for r in sub if not r.get("success")))
+            failures = [r for r in sub if not r.get("success")]
+            summary_err = (f"{len(created_keys)}/{len(pos)} Sales Orders created. Failed: "
+                           + "; ".join(f"PO {r.get('po_number')}: {_real_err(r)[:500]}"
+                                       for r in failures))
+            combined_raw = "\n\n".join(
+                f"── PO {r.get('po_number')} ──\n{_real_err(r)}" for r in failures) or None
+            combined_simpl = "\n\n".join(
+                f"PO {r.get('po_number')}: {r.get('api_error_simplified')}"
+                for r in failures if r.get("api_error_simplified")) or None
 
         log.info("═══ Multi-PO DONE: %s → %d/%d orders created (%.0f ms) ═══",
                  object_name, len(created_keys), len(pos), elapsed)
@@ -506,8 +514,6 @@ class POAutomationOrchestrator:
         return ProcessingResult(
             object_name=object_name, success=all_success,
             status=status, error=summary_err,
-            api_error_raw=combined_api_error_raw,
-            api_error_simplified=combined_api_error_simplified,
             order_key=created_keys[0] if created_keys else None,
             order_keys=created_keys,
             customer_name=first.get("customer_name"),
@@ -518,6 +524,8 @@ class POAutomationOrchestrator:
             lines=combined_lines, par_url=par_url,
             extracted={"purchase_orders": pos},
             sub_results=sub_trimmed,
+            api_error_raw=combined_raw,
+            api_error_simplified=combined_simpl,
             ship_to_address=first.get("ship_to_address"),
             ship_to_source=first.get("ship_to_source"),
             elapsed_ms=elapsed,
