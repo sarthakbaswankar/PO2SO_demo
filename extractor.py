@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from io import BytesIO
 from typing import Any
 
@@ -199,6 +200,16 @@ lines (array — one object per order line):
       - Look for: "UOM", "Unit", "Unit of Measure"
       - Preserve exactly as written. Default to "Each" if not found.
 
+    OrderedUOMName:
+      - The FULL, human-readable form of the unit of measure.
+      - Intelligently identify what the UOM code means and expand it, e.g.
+        "EA"/"EACH" -> "Each", "CS" -> "Case", "BX" -> "Box", "PK" -> "Pack",
+        "CTN" -> "Carton", "PLT"/"PAL" -> "Pallet", "DZ" -> "Dozen",
+        "KG" -> "Kilogram", "LB" -> "Pound", "L" -> "Litre", "M" -> "Metre",
+        "ROL" -> "Roll", "SET" -> "Set", "PR" -> "Pair".
+      - If the document already spells the unit out, use that spelling.
+      - If you genuinely cannot tell, repeat the OrderedUOMCode value.
+
     ProductDescription:
       - The human-readable description / name of the item (NOT the code).
       - Look for: "Description", "Item Description", "Product Description",
@@ -225,9 +236,6 @@ _extraction_notes:
       ["No explicit Buyer label — used Ship To party as customer."]
       ["Two currencies mentioned (USD/EUR); used USD from header."]
       ["Document had no Business Unit; defaulted to null."]
-      ["Line 1 UOM \'CS\' interpreted as Case (1 CS = 10 EA per customer agreement)."]
-  - If the UOM on any line is ambiguous or non-standard, note the full name
-    of the unit (e.g. \'CS = Case\', \'PK = Pack\') here so a human can verify.
   - Empty array [] if no notes needed.
 
 ═══════════════════════════════════════════════════
@@ -294,7 +302,8 @@ distinct PO number — see the MULTIPLE PURCHASE ORDERS section above):
           "ProductNumber":                "<product code>",
           "ProductDescription":           "<item description or null>",
           "OrderedQuantity":              <number>,
-          "OrderedUOMCode":               "<unit of measure code>"
+          "OrderedUOMCode":               "<unit of measure code>",
+          "OrderedUOMName":               "<full form of the unit of measure>"
         }
       ]
     }
@@ -336,7 +345,15 @@ def normalize_purchase_orders(extracted: dict[str, Any]) -> list[dict[str, Any]]
 class PDFExtractor:
     def __init__(self, cfg: GenAIConfig) -> None:
         self.cfg = cfg
-        oci_config = oci.config.from_file()   # uses ~/.oci/config DEFAULT profile
+        # Load the OCI config from the SAME location the rest of the app uses.
+        # On a server (Render, etc.) there is no ~/.oci/config, so we honour the
+        # OCI_CONFIG_PATH / OCI_PROFILE environment variables (e.g. a Render
+        # Secret File at /etc/secrets/oci_config). Falls back to the local
+        # default for development.
+        oci_config = oci.config.from_file(
+            file_location=os.getenv("OCI_CONFIG_PATH", "~/.oci/config"),
+            profile_name=os.getenv("OCI_PROFILE", "DEFAULT"),
+        )
         self._client = GenerativeAiInferenceClient(
             config=oci_config,
             service_endpoint=cfg.service_endpoint,
