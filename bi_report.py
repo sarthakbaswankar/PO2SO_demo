@@ -9,6 +9,7 @@ the final Sales Order JSON payload.
 from __future__ import annotations
 
 import csv
+import datetime
 import io
 import logging
 from typing import Any
@@ -311,6 +312,93 @@ class BIReportClient:
         log.info("XREF-STEP: built %d item mapping(s)", len(mapping))
         return mapping
 
+    # ── Order History report (ambiguous ship-to tie-breaker) ──────────────────
+    def fetch_ship_to_order_history(
+        self, customer_name: str | None, recent_days: int | None = None,
+    ) -> dict[int, dict[str, Any]]:
+        """Run the Order History report and return, per ship-to PARTY_SITE_ID,
+        how many DISTINCT orders shipped there within the last `recent_days`
+        (default: cfg.order_history_recent_days) — the signal used to break a
+        tie between near-identical sites: whichever has shipped more
+        RECENTLY/more often lately is the more probable site.
+
+        Used ONLY as a tie-breaker when the address matcher cannot confidently
+        choose between near-identical sites (an ambiguous "needs_review"
+        match) — never called on a confident match. Best-effort: raises on
+        failure so the caller can fall back to leaving the PO for review (it
+        must NOT silently invent a pick).
+
+        The report returns RAW per-line rows (no pre-aggregation, no
+        CANCELED_FLAG — cancellations are already excluded upstream by the
+        report's own WHERE clause) — both `recent_order_count` and
+        `total_order_count` are computed here from those rows.
+
+        Returns { ship_to_party_site_id: {"recent_order_count",
+        "total_order_count"} } — DISTINCT header_id counts. recent_order_count
+        is the one used to break ties; total_order_count is kept for logging.
+        """
+        recent_days = recent_days if recent_days is not None else self.cfg.order_history_recent_days
+        req = DownloadRequest(report_path=self.cfg.order_history_report_path,
+                              customer_name=customer_name)
+        log.info("HIST-STEP: calling order-history report %s for customer=%r (recent_days=%d)",
+                 self.cfg.order_history_report_path, customer_name, recent_days)
+
+        session = make_session()  # own session — safe alongside other report calls
+        _filename, csv_bytes = fetch_report_csv(req, self._bip_settings, session)
+        log.info("HIST-STEP: report returned %d CSV byte(s)", len(csv_bytes))
+
+        try:
+            csv_path = dump_text(csv_bytes.decode("utf-8", errors="replace"),
+                                 f"bip_order_history_{customer_name or 'unknown'}", suffix="csv")
+            if csv_path:
+                log.info("HIST-STEP: raw CSV saved -> %s", csv_path)
+        except Exception as dump_exc:
+            log.warning("HIST-STEP: could not save raw CSV: %s", dump_exc)
+
+        reader = csv.DictReader(io.StringIO(csv_bytes.decode("utf-8-sig")))
+        rows = list(reader)
+        log.info("HIST-STEP: parsed %d row(s) from order history", len(rows))
+
+        def _g(row: dict, *names: str):
+            # Tolerant of missing/blank columns (e.g. the territory lookups
+            # are LEFT JOINs and can be NULL) — always returns None rather
+            # than raising, so a blank column never breaks this lookup.
+            lower = {(k or "").strip().lstrip("﻿").strip().lower(): v
+                     for k, v in row.items()}
+            for n in names:
+                v = lower.get(n.lower())
+                if v not in (None, ""):
+                    return v
+            return None
+
+        cutoff = datetime.date.today() - datetime.timedelta(days=recent_days)
+        all_headers: dict[int, set] = {}
+        recent_headers: dict[int, set] = {}
+        for row in rows:
+            site_id = _int(_g(row, "SHIP_TO_PARTY_SITE_ID"))
+            header_id = _g(row, "HEADER_ID")
+            if site_id is None or header_id is None:
+                continue
+            shipped_qty = _float(_g(row, "SHIPPED_QTY")) or 0.0
+            if shipped_qty <= 0:
+                continue
+
+            all_headers.setdefault(site_id, set()).add(header_id)
+            ship_date = _parse_mmddyy(_g(row, "SHIPMENT_DATE"))
+            if ship_date is not None and ship_date >= cutoff:
+                recent_headers.setdefault(site_id, set()).add(header_id)
+
+        freq: dict[int, dict[str, Any]] = {
+            site_id: {
+                "recent_order_count": len(recent_headers.get(site_id, ())),
+                "total_order_count": len(headers),
+            }
+            for site_id, headers in all_headers.items()
+        }
+        log.info("HIST-STEP: built frequency map for %d distinct ship-to site(s) "
+                 "(recent window: last %d day(s))", len(freq), recent_days)
+        return freq
+
 
 def _int(value: str | None) -> int | None:
     """Safely convert a string to int; return None if blank or unconvertible."""
@@ -320,4 +408,26 @@ def _int(value: str | None) -> int | None:
     try:
         return int(float(str(value).strip()))
     except (ValueError, TypeError):
+        return None
+
+
+def _float(value: str | None) -> float | None:
+    """Safely convert a string to float; return None if blank or unconvertible."""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return float(str(value).strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_mmddyy(value: str | None) -> datetime.date | None:
+    """Parse a TO_CHAR(..., 'MM/DD/YY') date string from the report. Returns
+    None for blank/unparseable values rather than raising — a single bad date
+    must not break the whole frequency lookup."""
+    if not value:
+        return None
+    try:
+        return datetime.datetime.strptime(str(value).strip(), "%m/%d/%y").date()
+    except ValueError:
         return None

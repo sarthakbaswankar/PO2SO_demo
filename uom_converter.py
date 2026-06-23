@@ -35,6 +35,13 @@ _DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "data", "uom_conversions.yaml")
 UOM_CONVERSIONS_PATH = os.getenv("PO2SO_UOM_CONVERSIONS_PATH", _DEFAULT_PATH)
 
+# data/UOM.yaml next to this file — {CODE: Description} pairs (e.g. "GAL":
+# "Gallon") used to resolve whatever Gemini extracted for a line's UOM (which
+# may be the full word, in any case) to the canonical Oracle UOM code.
+_DEFAULT_KB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "data", "UOM.yaml")
+UOM_KNOWLEDGE_BASE_PATH = os.getenv("PO2SO_UOM_KB_PATH", _DEFAULT_KB_PATH)
+
 # Writing the YAML must be serialised so two UI saves can't corrupt the file.
 _WRITE_LOCK = threading.Lock()
 
@@ -85,6 +92,46 @@ def save_rules(rules: list[dict[str, Any]], path: str | None = None) -> None:
                            default_flow_style=False)
         os.replace(tmp, path)  # atomic on POSIX
     log.info("UOM: saved %d rule(s) -> %s", len(cleaned), path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UOM knowledge base (code <-> description lookup, from data/UOM.yaml)
+# ─────────────────────────────────────────────────────────────────────────────
+def load_uom_knowledge_base(path: str | None = None) -> dict[str, str]:
+    """Return {CODE: Description} from data/UOM.yaml. Missing/empty/broken
+    file -> {} (callers must treat that as "no lookup available", not an error)."""
+    path = path or UOM_KNOWLEDGE_BASE_PATH
+    if not os.path.exists(path):
+        log.info("UOM-KB: knowledge base not found at %s — no lookup available.", path)
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        kb = data.get("uom_knowledge_base") or {}
+        if not isinstance(kb, dict):
+            log.warning("UOM-KB: 'uom_knowledge_base' is not a mapping in %s — ignoring.", path)
+            return {}
+        return {str(k).strip(): str(v).strip() for k, v in kb.items() if k}
+    except Exception as exc:
+        log.error("UOM-KB: could not read %s: %s", path, exc)
+        return {}
+
+
+def resolve_uom_code(raw_uom: str | None, kb: dict[str, str] | None = None) -> str | None:
+    """Resolve whatever was extracted for a line's UOM — a code ("GAL") or
+    the full description ("Gallon"), in ANY case — to the canonical Oracle
+    UOM code via data/UOM.yaml. Returns None if no match (caller should leave
+    the original value unchanged rather than guess)."""
+    if not raw_uom:
+        return None
+    kb = kb if kb is not None else load_uom_knowledge_base()
+    if not kb:
+        return None
+    needle = raw_uom.strip().upper()
+    for code, desc in kb.items():
+        if needle == code.upper() or (desc and needle == desc.upper()):
+            return code
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

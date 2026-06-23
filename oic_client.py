@@ -126,3 +126,53 @@ class OICClient:
 
         log.info("OIC error-notification sent OK (HTTP %s).", resp.status_code)
         return {"sent": True, "status_code": resp.status_code}
+
+    # ── New-ship-to-address notification integration ────────────────────────
+    def trigger_shipto_notification(
+        self, customer_number: Any, customer_name: Any, ship_to_address: Any,
+    ) -> dict[str, Any]:
+        """Call the PO2SO_SHIPTO_APPROVAL_NOTIFY integration to ask a human to
+        approve a brand-new ship-to address found on a PO.
+
+        Invoked only when the ship-to address matcher gives up entirely (no
+        address on file is even close). Best-effort: never raises, so a failed
+        notification never masks the underlying ship-to match failure.
+        `requestorEmail` / `approvalLink` are fixed config values, not derived
+        from the PO.
+        """
+        if not self.cfg.shipto_notify_enabled:
+            log.info("OIC ship-to notification disabled (OIC_SHIPTO_NOTIFY_ENABLED=false).")
+            return {"sent": False, "skipped": True, "reason": "disabled"}
+
+        url = self.cfg.shipto_notify_trigger_url
+        method = (self.cfg.shipto_notify_method or "POST").upper()
+        if not url or "CHANGE-ME" in url:
+            log.warning("OIC ship-to notification URL not configured — skipping.")
+            return {"sent": False, "skipped": True, "reason": "not configured"}
+        if not self.cfg.oic_username or not self.cfg.oic_password:
+            log.warning("OIC credentials missing — skipping ship-to notification.")
+            return {"sent": False, "skipped": True, "reason": "no credentials"}
+
+        body = {
+            "customerNumber": customer_number,
+            "customerName": customer_name,
+            "shipToAddress": ship_to_address,
+            "requestorEmail": self.cfg.shipto_requestor_email,
+            "approvalLink": self.cfg.shipto_approval_link,
+        }
+        log.info("OIC ship-to notification: %s %s (body=%s)", method, url, body)
+        try:
+            resp = self._session.request(
+                method, url, json=body, timeout=self.cfg.request_timeout
+            )
+        except requests.RequestException as exc:
+            log.warning("OIC ship-to notification network error (ignored): %s", exc)
+            return {"sent": False, "error": str(exc)}
+
+        if not resp.ok:
+            log.warning("OIC ship-to notification HTTP %d: %s",
+                        resp.status_code, resp.text[:300])
+            return {"sent": False, "status_code": resp.status_code}
+
+        log.info("OIC ship-to notification sent OK (HTTP %s).", resp.status_code)
+        return {"sent": True, "status_code": resp.status_code}

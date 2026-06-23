@@ -11,7 +11,9 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+import customer_lov
 import uom_converter as uom
+from config import settings
 
 st.set_page_config(page_title="UOM Conversions", page_icon="🔁", layout="wide")
 
@@ -44,6 +46,29 @@ OPERATORS = ["*", "/", "+", "-"]
 # Column order: Part Number | UOM Ordered | Qty Conversion (factor) | UOM Sold | Customer
 # The = sits between UOM Ordered and Qty Conversion; × sits between Qty Conversion and UOM Sold.
 COLUMNS = ["part_number", "uom_ordered", "factor", "operator", "uom_sold", "customer"]
+
+
+# ── Customer LOV (from Fusion) — picking from a list avoids typos that would
+# silently never match a PO's CustomerName. "*" (any customer) is always first.
+@st.cache_data(ttl=3600)
+def _load_customer_names() -> list[str]:
+    return customer_lov.fetch_shipping_customers(
+        settings.sales_order.oracle_base_url,
+        settings.sales_order.oracle_username,
+        settings.sales_order.oracle_password,
+    )
+
+
+_lov_col1, _lov_col2 = st.columns([5, 1])
+if _lov_col2.button("↻  Refresh customer list", help="Re-fetch from Fusion (cached for 1 hour otherwise)."):
+    _load_customer_names.clear()
+    st.rerun()
+
+try:
+    CUSTOMER_OPTIONS = ["*"] + _load_customer_names()
+except Exception as exc:
+    st.warning(f"Could not load the customer list from Fusion ({exc}) — using free text instead.")
+    CUSTOMER_OPTIONS = None
 
 
 def _load_df() -> pd.DataFrame:
@@ -100,9 +125,13 @@ edited = st.data_editor(
             help="UOM the Sales Order is created in (e.g. EA = Each). This is the result unit after conversion.",
             required=True,
         ),
-        "customer": st.column_config.TextColumn(
-            "Customer",
-            help="Customer name, or * for any customer.",
+        "customer": (
+            st.column_config.SelectboxColumn(
+                "Customer", options=CUSTOMER_OPTIONS,
+                help="Customer name from Fusion, or * for any customer.",
+            ) if CUSTOMER_OPTIONS else st.column_config.TextColumn(
+                "Customer", help="Customer name, or * for any customer.",
+            )
         ),
     },
 )
@@ -137,7 +166,8 @@ with st.form("add_uom_rule", clear_on_submit=True):
     g1, g2, g3 = st.columns(3)
     operator = g1.selectbox("Operator (* × / ÷ + −)", OPERATORS, index=0)
     factor   = g2.number_input("Qty Conversion", min_value=0.0, value=1.0, step=1.0)
-    customer = g3.text_input("Customer", placeholder="Walkswagen")
+    customer = (g3.selectbox("Customer", CUSTOMER_OPTIONS, index=0) if CUSTOMER_OPTIONS
+                else g3.text_input("Customer", placeholder="Walkswagen"))
     submitted = st.form_submit_button("➕  Add rule", type="primary")
     if submitted:
         rule = {

@@ -639,16 +639,32 @@ class PDFExtractor:
             if bits:
                 ctx = "\nContext: " + ", ".join(bits)
         prompt = (
-            "You are helping a non-technical business user understand why creating "
-            "a Sales Order in Oracle Fusion failed. Read the raw API error below and "
-            "explain, in 2-4 short plain-English sentences: (1) what went wrong, and "
-            "(2) EXACTLY which field/parameter the user should readjust to fix it "
-            "(name the specific field, e.g. 'Product Number', 'Unit of Measure', "
-            "'Currency Code', 'Business Unit', or the price-list/item setup), and what "
-            "to change it to if you can tell. Do not output JSON, code, stack traces, "
-            "raw error codes, or technical jargon. Be specific and actionable. "
-            "IMPORTANT: write COMPLETE sentences and finish your explanation fully — "
-            "do not stop mid-sentence."
+            "You explain to a NON-TECHNICAL business user why creating a Sales "
+            "Order in Oracle Fusion failed.\n\n"
+            "Base your explanation ONLY on the raw error text below. Do NOT invent, "
+            "assume, or guess any cause, field name, value, fix, credential, or "
+            "number that is not clearly supported by that text.\n\n"
+            "Write 2-4 short, plain-English sentences that cover:\n"
+            "1) What the error indicates went wrong (in plain words).\n"
+            "2) What to do about it — but ONLY as the error supports it:\n"
+            "   - If it clearly blames a specific ORDER field (e.g. item/product, "
+            "unit of measure, currency, business unit, price), name that field, and "
+            "state what to correct ONLY if the error says so.\n"
+            "   - If it is a SYSTEM-level problem (authentication, login/credentials, "
+            "connection, permission, timeout, server/5xx), say it is a system issue "
+            "for the IT/admin team to fix, and that it CANNOT be fixed by editing the "
+            "order's fields.\n"
+            "   - If the cause is NOT clear from the error, say that plainly and "
+            "suggest checking the raw error or contacting support. Do NOT make up a "
+            "reason.\n\n"
+            "Rules:\n"
+            "- Never fabricate field names, values, credentials, PO numbers, prices, "
+            "or steps that are not in the error text.\n"
+            "- Do not suggest changing order details unless the error clearly points "
+            "to an order field.\n"
+            "- No JSON, error codes, stack traces, or technical jargon.\n"
+            "- Mention the PO number / customer only if given in Context below.\n"
+            "- Write complete sentences; do not stop mid-sentence."
             f"{ctx}\n\nRaw error:\n{raw_error}"
         )
         try:
@@ -662,7 +678,7 @@ class PDFExtractor:
                 # explanation is cut off mid-sentence. Give it ample room so the
                 # full explanation always comes through.
                 max_tokens=4000,
-                temperature=0.2,
+                temperature=0.0,
                 is_stream=False,
             )
             chat_details = ChatDetails(

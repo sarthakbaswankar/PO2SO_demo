@@ -55,7 +55,7 @@ Oracle BI Publisher . Oracle Fusion Sales Order REST API . Oracle Integration Cl
 | `uom_converter.py` | Reads `data/uom_conversions.yaml`; converts a line's quantity + UOM. |
 | `address_matcher.py` | Picks the correct ship-to address out of many. |
 | `sales_order.py` | Builds the SO payload, checks duplicates, POSTs the order, attaches the PDF. |
-| `oic_client.py` | Triggers OIC integrations (inbox pull; **error notification**). |
+| `oic_client.py` | Triggers OIC integrations (inbox pull; **error notification**; **new-ship-to-address approval notification**). |
 | `orchestrator.py` | The conductor - runs every step in order, in parallel where useful. |
 | `app.py` + `pages/` | The Streamlit UI (dashboard, upload, history, workbench, UOM editor). |
 
@@ -137,6 +137,12 @@ Each step below shows: **what it does**, the **module/function**, and the
 - **In -> Out:** PDF ship-to + candidate list ->
   `ShipToPartyId` + `ShipToPartySiteId` (merged into `bi_data`), **or** no match
   (-> error path; the UI shows the PDF address + closest candidates).
+- **New-address notification:** when the matcher **gives up entirely**
+  (`method == "none"` - nothing on file is even close, as opposed to
+  `needs_review` where a similar address exists and a human just picks it),
+  this is treated as a likely **brand-new ship-to address** and triggers a
+  separate OIC notification asking a human to approve it before any Sales
+  Order can be created against it. See §11.
 
 ### Step 4c - UOM conversion
 - **What:** Convert the line's quantity + unit using rules from the YAML file
@@ -234,7 +240,7 @@ PDF --> extract --> [PO #23, PO #24, PO #25]
 | OCI Generative AI (Gemini) | `extractor.py` | Read the PDF, validate addresses, explain errors. |
 | Oracle BI Publisher | `bi_report.py` | Customer + ship-to addresses, item cross-reference. |
 | Oracle Fusion SO REST API | `sales_order.py` | Duplicate check, create order, attach PDF. |
-| Oracle Integration Cloud | `oic_client.py` | Pull inbox POs; **error notification**. |
+| Oracle Integration Cloud | `oic_client.py` | Pull inbox POs; **error notification**; **new-ship-to-address approval notification**. |
 
 ---
 
@@ -246,8 +252,11 @@ PDF --> extract --> [PO #23, PO #24, PO #25]
 - **BIP:** base URL + credentials, `report_path`, `address_report_path`
   (defaults to `report_path`), `xref_report_path`.
 - **Sales Order:** API path, `attachment_mode` (`url`/`file`), PAR TTL.
-- **OIC:** `trigger_url` (inbox) and `error_trigger_url` (`.../PO2SO_ERR/...`),
-  Basic Auth, on/off switches.
+- **OIC:** `trigger_url` (inbox), `error_trigger_url` (`.../PO2SO_ERR/...`), and
+  `shipto_notify_trigger_url` (`.../PO2SO_SHIPTO_APPROVAL_NOTIFY/...`, POST),
+  Basic Auth, on/off switches. Ship-to notification also has fixed
+  `shipto_requestor_email` / `shipto_approval_link` defaults (not derived from
+  the PO).
 - **UOM:** `conversions_path`, `enabled`.
 
 Most values can be overridden with environment variables - see the `os.getenv`
@@ -273,3 +282,45 @@ defaults in `config.py`.
 only**; `SiteUseId` was **removed** (Oracle derives the site-use from
 PartyId + SiteId). The address matcher still resolves a `SiteUseId` for display
 and logging, but it is not part of the Sales Order payload.
+
+---
+
+## 11. New feature - new-ship-to-address approval notification
+
+- **What:** When a PO's ship-to address is genuinely **new** (no address on
+  file is even close - the matcher gives up entirely), trigger an OIC
+  integration that emails a requestor an **approval link** so a human can add
+  the address before the PO is reprocessed. This fires **only** on a hard
+  failure - it does **not** fire for `needs_review` (an ambiguous but similar
+  address already exists on file; that's a human pick, not a new address).
+- **Arch:**
+  `address_matcher.match_ship_to_address()` returns `method == "none"` when it
+  gives up -> `orchestrator._resolve_ship_to()` propagates that result ->
+  `orchestrator._create_so_for_po()` checks `match_res.method == "none"` and
+  calls `orchestrator._notify_new_shipto(po)` -> `oic_client.OICClient.
+  trigger_shipto_notification(...)` -> POST to the
+  `PO2SO_SHIPTO_APPROVAL_NOTIFY` OIC flow. The existing general error
+  notification (§OIC error-notification) still fires afterward as before -
+  this is an **additional**, ship-to-specific notification, not a replacement.
+- **Payload sent (JSON body, POST):**
+  ```json
+  {
+    "customerNumber": "CUST1001",
+    "customerName": "ABC Industries",
+    "shipToAddress": "123 Main Street, Pune, Maharashtra",
+    "requestorEmail": "requestor@company.com",
+    "approvalLink": "https://your-streamlit-url/approve"
+  }
+  ```
+  - `customerNumber`, `customerName`, `shipToAddress` are populated from the
+    **extracted PO data** (`shipToAddress` is the PDF's ship-to text, since by
+    definition it didn't match anything on file).
+  - `requestorEmail` and `approvalLink` are **fixed** - always the configured
+    defaults, never derived from the PO.
+- **In -> Out:** ship-to match gives up -> one best-effort POST (never raises;
+  a failed notification never masks the underlying ship-to match failure).
+- **Config (`config.py` -> `OICConfig`):** `shipto_notify_trigger_url`
+  (env `OIC_SHIPTO_NOTIFY_TRIGGER_URL`), `shipto_notify_method` (default
+  `POST`), `shipto_notify_enabled` (env `OIC_SHIPTO_NOTIFY_ENABLED`),
+  `shipto_requestor_email` (env `OIC_SHIPTO_REQUESTOR_EMAIL`),
+  `shipto_approval_link` (env `OIC_SHIPTO_APPROVAL_LINK`).

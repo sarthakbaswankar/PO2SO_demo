@@ -30,7 +30,7 @@ from extractor import PDFExtractor, normalize_purchase_orders
 from bi_report import BIReportClient
 from sales_order import SalesOrderClient, SalesOrderAPIError
 from oic_client import OICClient
-from uom_converter import apply_uom_conversions
+from uom_converter import apply_uom_conversions, load_uom_knowledge_base, resolve_uom_code
 from address_matcher import (
     parse_bip_address_rows, match_ship_to_address, pdf_address_text,
 )
@@ -157,6 +157,73 @@ class POAutomationOrchestrator:
                     pdf_address_text(pdf_addr) or "<none>")
         return {}, result
 
+    def _resolve_via_order_history(self, po: dict, match_res: Any) -> tuple[dict, str]:
+        """Best-effort tie-break for an AMBIGUOUS ship-to match (needs_review
+        with 2+ near-identical candidates, e.g. "Site 05" missing the
+        distinguishing suite text that's only on file as ADDRESS2). Looks at
+        which of the close candidates has shipped MORE RECENTLY / more often
+        lately (within cfg.order_history_recent_days) and picks that one —
+        recency is the deciding signal, not lifetime totals.
+
+        Only called when the validator layer itself could not confidently
+        decide — never used to override or second-guess a confident match.
+        Returns ({}, "") if history doesn't resolve the tie either (no recent
+        data, or the top two are tied), in which case the PO is still left
+        for human review exactly as before.
+        """
+        candidates = match_res.top_candidates or []
+        if len(candidates) < 2:
+            return {}, ""
+        try:
+            freq = self.bi_client.fetch_ship_to_order_history(po.get("CustomerName"))
+        except Exception as exc:
+            log.warning("ADDR-HISTORY: order-history lookup failed (ignored): %s", exc)
+            return {}, ""
+        if not freq:
+            log.info("ADDR-HISTORY: no order history available — leaving for review.")
+            return {}, ""
+
+        scored = [(c, freq[c.ship_to_party_site_id]["recent_order_count"])
+                  for c in candidates if c.ship_to_party_site_id in freq]
+        if not scored:
+            log.info("ADDR-HISTORY: no history for any ambiguous candidate — leaving for review.")
+            return {}, ""
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        best_c, best_n = scored[0]
+        runner_n = scored[1][1] if len(scored) > 1 else -1
+        if best_n <= 0 or best_n == runner_n:
+            log.info("ADDR-HISTORY: tie or no recent shipments (best=%s, runner=%s) — leaving for review.",
+                      best_n, runner_n)
+            return {}, ""
+
+        log.info("ADDR-HISTORY: picked %r (%d recent order(s)) over %d other ambiguous candidate(s).",
+                  best_c.display(), best_n, len(candidates) - 1)
+        return best_c.to_ids(), "history_frequency"
+
+    @staticmethod
+    def _normalize_uom_codes(po: dict) -> int:
+        """Resolve each line's UOM — a code OR the full description, in ANY
+        case (e.g. the PDF literally printing "Gallon" or "GALLON" instead of
+        "GAL") — to the canonical Oracle UOM code via data/UOM.yaml. Must run
+        BEFORE UOM conversion / payload build: Oracle rejects a UOM that isn't
+        a real code, and conversion rules are matched by code. No-op (and
+        leaves lines unchanged) when the knowledge base is missing/empty.
+        """
+        kb = load_uom_knowledge_base()
+        if not kb:
+            return 0
+        normalized = 0
+        for line in po.get("lines", []) or []:
+            raw = line.get("OrderedUOMCode")
+            code = resolve_uom_code(raw, kb)
+            if code and code != raw:
+                log.info("UOM-KB: resolved %r -> %r", raw, code)
+                line["OrderedUOMCode"] = code
+                line["OrderedUOMName"] = kb.get(code) or line.get("OrderedUOMName")
+                normalized += 1
+        return normalized
+
     @staticmethod
     def _apply_uom(po: dict) -> int:
         """Apply UOM conversions to a PO's lines (after the item cross-reference).
@@ -167,6 +234,20 @@ class POAutomationOrchestrator:
         return apply_uom_conversions(
             po.get("lines", []) or [], po.get("CustomerName"),
         )
+
+    def _notify_new_shipto(self, po: dict) -> None:
+        """Best-effort: trigger the new-ship-to-address notification when the
+        matcher gives up entirely (method == "none") — likely a brand-new
+        address that needs human approval before a Sales Order can be created
+        for it. Never raises."""
+        try:
+            self.oic.trigger_shipto_notification(
+                customer_number=po.get("CustomerNumber"),
+                customer_name=po.get("CustomerName"),
+                ship_to_address=pdf_address_text(po.get("ShipToAddress")),
+            )
+        except Exception as exc:  # belt-and-braces; method is already best-effort
+            log.warning("Ship-to notification trigger raised (ignored): %s", exc)
 
     def _notify_error(self, object_name: str, data: dict | None, error: str) -> None:
         """Best-effort: trigger the OIC error-notification integration AFTER the
@@ -227,8 +308,18 @@ class POAutomationOrchestrator:
             ship_to_ids, match_res = self._resolve_ship_to(po, address_rows)
             out["ship_to_match_method"] = match_res.method
             if not ship_to_ids:
+                # Ambiguous between near-identical sites (e.g. the PDF is
+                # missing the distinguishing suite/park text) → try the order
+                # history report as a last-resort tie-breaker before giving up.
+                if match_res.needs_review and len(match_res.top_candidates or []) >= 2:
+                    ship_to_ids, hist_method = self._resolve_via_order_history(po, match_res)
+                    if ship_to_ids:
+                        out["ship_to_match_method"] = hist_method
+            if not ship_to_ids:
                 out["ship_to_address"] = pdf_address_text(po.get("ShipToAddress"))
                 out["ship_to_source"] = "pdf"
+                if match_res.method == "none":
+                    self._notify_new_shipto(po)
                 raise ValueError(
                     "Ship-to address could not be matched to the BI report "
                     f"({match_res.reason}). PDF address kept for review."
@@ -237,6 +328,10 @@ class POAutomationOrchestrator:
             out["ship_to_source"] = "bip"
 
             bi_data = {**base_fields, **ship_to_ids}
+
+            # UOM knowledge-base lookup (resolve a printed UOM description to
+            # its Oracle code) MUST run before conversion rules are matched.
+            self._normalize_uom_codes(po)
 
             # UOM conversion at the line level (AFTER the item cross-reference).
             self._apply_uom(po)
@@ -394,8 +489,7 @@ class POAutomationOrchestrator:
                 extracted=po, payload=core.get("payload"),
                 ship_to_address=core.get("ship_to_address"),
                 ship_to_source=core.get("ship_to_source"),
-                ship_to_match_method=core.get("ship_to_match_method"),
-                elapsed_ms=elapsed,
+                ship_to_match_method=core.get("ship_to_match_method"),                elapsed_ms=elapsed,
             )
 
         # Success — attach the source PDF (URL/FILE) and move the file once.
@@ -699,8 +793,7 @@ class POAutomationOrchestrator:
                 bi_data=core.get("bi_data"),
                 ship_to_address=core.get("ship_to_address"),
                 ship_to_source=core.get("ship_to_source"),
-                ship_to_match_method=core.get("ship_to_match_method"),
-                log_file=log_path, elapsed_ms=elapsed,
+                ship_to_match_method=core.get("ship_to_match_method"),                log_file=log_path, elapsed_ms=elapsed,
             )
 
     def run(self) -> list[ProcessingResult]:

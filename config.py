@@ -87,10 +87,10 @@ class BIPConfig:
     )
 
     # !! CHANGE: Oracle Fusion username
-    oracle_username: str = os.getenv("ORACLE_USERNAME", "tripti.chugh@pinelabs.com")
+    oracle_username: str = os.getenv("ORACLE_USERNAME", "suraj.yadav@pinelabs.com")
 
     # !! CHANGE: Oracle Fusion password
-    oracle_password: str = os.getenv("ORACLE_PASSWORD", "Welcome@1234@")
+    oracle_password: str = os.getenv("ORACLE_PASSWORD", "India@123@")
 
     # !! CHANGE: Full path to the BI report in BIP catalog
     # e.g. "/Custom/Reports/Sales/Customer_Data.xdo"
@@ -125,6 +125,19 @@ class BIPConfig:
         "BIP_REPORT_PATH", "/Custom/Sarthak_PO/PO_report.xdo"
     )
 
+    # Order History report (one parameter: Customer Name). Returns full order
+    # history with a per-ship-to-site shipment frequency measure. Used ONLY as
+    # a tie-breaker when the address matcher lands on an AMBIGUOUS match
+    # between near-identical sites — never called on a confident match.
+    order_history_report_path: str = os.getenv(
+        "BIP_ORDER_HISTORY_REPORT_PATH",
+        "/Custom/Sarthak_PO/Order History/order_history_report.xdo",
+    )
+    # How far back (from today) a shipment still counts as "recent" when
+    # breaking a tie between near-identical sites — whichever ambiguous site
+    # has more recent shipments wins.
+    order_history_recent_days: int = int(os.getenv("BIP_ORDER_HISTORY_RECENT_DAYS", "180"))
+
     request_timeout: int = int(os.getenv("BIP_TIMEOUT", "3000"))
 
 
@@ -140,8 +153,8 @@ class SalesOrderConfig:
     )
 
     # !! CHANGE: same credentials as BIP
-    oracle_username: str = os.getenv("ORACLE_USERNAME", "tripti.chugh@pinelabs.com")
-    oracle_password: str = os.getenv("ORACLE_PASSWORD", "Welcome@1234@")
+    oracle_username: str = os.getenv("ORACLE_USERNAME", "suraj.yadav@pinelabs.com")
+    oracle_password: str = os.getenv("ORACLE_PASSWORD", "India@123@")
 
     # REST API endpoint path (standard Oracle Fusion path)
     api_path: str = "/fscmRestApi/resources/11.13.18.05/salesOrdersForOrderHub"
@@ -209,6 +222,31 @@ class OICConfig:
     # Master on/off for the error notification (kept separate from the inbox one).
     error_notification_enabled: bool = (
         os.getenv("OIC_ERROR_NOTIFICATION_ENABLED", "true").lower() == "true"
+    )
+
+    # ── New-ship-to-address notification integration ────────────────────────
+    # Triggered when the ship-to address matcher gives up entirely (no address
+    # on file is even close to the PDF's ship-to) — i.e. the PO likely carries a
+    # brand-new ship-to address that needs approval before a Sales Order can be
+    # created for it. NOT triggered on "needs_review" (an ambiguous but similar
+    # address already exists — that's a human pick, not a new address).
+    shipto_notify_trigger_url: str = os.getenv(
+        "OIC_SHIPTO_NOTIFY_TRIGGER_URL",
+        "https://acse-dev-bmarpjct5zvz-ia.integration.us-ashburn-1.ocp.oraclecloud.com"
+        "/ic/api/integration/v2/flows/rest/project/PO2SO/PO2SO_SHIPTO_APPROVAL_NOTIFY"
+        "/1.0/shiptoapproval",
+    )
+    shipto_notify_method: str = os.getenv("OIC_SHIPTO_NOTIFY_METHOD", "POST").upper()
+    shipto_notify_enabled: bool = (
+        os.getenv("OIC_SHIPTO_NOTIFY_ENABLED", "true").lower() == "true"
+    )
+    # Fixed fields sent on every new-ship-to-address notification (not derived
+    # from the PO — only customerNumber/customerName/shipToAddress are).
+    shipto_requestor_email: str = os.getenv(
+        "OIC_SHIPTO_REQUESTOR_EMAIL", "requestor@company.com"
+    )
+    shipto_approval_link: str = os.getenv(
+        "OIC_SHIPTO_APPROVAL_LINK", "https://your-streamlit-url/approve"
     )
 
     request_timeout: int = int(os.getenv("OIC_TIMEOUT", "500"))

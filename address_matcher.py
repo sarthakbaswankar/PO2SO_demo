@@ -65,6 +65,12 @@ class AddressCandidate:
     ship_to_party_id: int | None = None
     ship_to_party_site_id: int | None = None
     ship_to_site_use_id: int | None = None
+    # Account-level fields carried on EVERY row (joined off this row's own
+    # CUST_ACCOUNT_ID) so they always travel together with whichever site
+    # matches — a customer can have more than one active account, and a
+    # BillToSiteUseId is only valid paired with the account that owns it.
+    cust_account_id: int | None = None
+    bill_to_site_use_id: int | None = None
     name: str = ""
     address1: str = ""
     address2: str = ""
@@ -72,6 +78,10 @@ class AddressCandidate:
     state: str = ""
     postal_code: str = ""
     country: str = ""
+    # Full country NAME (e.g. "United States"), as opposed to `country` which
+    # is usually the CODE (e.g. "US"). The PDF sometimes prints the full name
+    # instead of the code, so matching checks both.
+    country_nls_territory: str = ""
     raw: str = ""
     row: dict[str, Any] = field(default_factory=dict)
 
@@ -91,12 +101,19 @@ class AddressCandidate:
         return self.full_text() or "—"
 
     def to_ids(self) -> dict[str, Any]:
-        """The fields the Sales Order payload needs for shipToCustomer."""
+        """The fields the Sales Order payload needs for shipToCustomer AND
+        billToCustomer's account-level fields.
+
+        CustomerAccountId / BillToSiteUseId come from THIS row, not a
+        different row's default — they must travel together with whichever
+        site gets matched, since a site-use only belongs to one account."""
         return {
             "ShipToPartyId":     self.ship_to_party_id,
             "ShipToPartySiteId": self.ship_to_party_site_id,
             "ShipToSiteUseId":   self.ship_to_site_use_id,
             "ShipToAddress":     self.full_text(),
+            "CustomerAccountId": self.cust_account_id,
+            "BillToSiteUseId":   self.bill_to_site_use_id,
         }
 
 
@@ -239,6 +256,8 @@ def parse_bip_address_rows(rows: list[dict[str, Any]]) -> list[AddressCandidate]
                                              "ShipToPartySiteId", "PARTY_SITE_ID")),
             ship_to_site_use_id=_int(_pick(row, "SHIP_TO_SITE_USE_ID",
                                            "ShipToSiteUseId", "SITE_USE_ID")),
+            cust_account_id=_int(_pick(row, "CUST_ACCOUNT_ID", "CUSTOMER_ACCOUNT_ID")),
+            bill_to_site_use_id=_int(_pick(row, "BILL_TO_SITE_USE_ID", "BillToSiteUseId")),
             name=_pick(row, "SHIP_TO_PARTY_NAME", "SHIP_TO_NAME", "PARTY_NAME",
                        "SITE_NAME", "PARTY_SITE_NAME"),
             address1=_pick(row, "SHIP_TO_ADDRESS1", "ADDRESS1", "ADDRESS_LINE_1",
@@ -250,6 +269,7 @@ def parse_bip_address_rows(rows: list[dict[str, Any]]) -> list[AddressCandidate]
             postal_code=_pick(row, "SHIP_TO_POSTAL_CODE", "POSTAL_CODE", "ZIP",
                               "ZIP_CODE", "POSTCODE", "PostalCode"),
             country=_pick(row, "SHIP_TO_COUNTRY", "COUNTRY", "COUNTRY_CODE"),
+            country_nls_territory=_pick(row, "COUNTRY_NLS_TERRITORY"),
             raw=_pick(row, "SHIP_TO_ADDRESS", "FULL_ADDRESS", "ADDRESS"),
             row=row,
         )
@@ -336,6 +356,16 @@ def _score_candidate(pdf_addr: dict[str, Any], cand: AddressCandidate,
     if pdf_city and cand.city and _similar(pdf_city, _norm(cand.city)) >= 0.8:
         conf += 0.05
     if pdf_state and cand.state and _similar(pdf_state, _norm(cand.state)) >= 0.8:
+        conf += 0.03
+    # Country: the PDF may print the full name ("United States") instead of
+    # the code ("US"), so check the PDF's value against EITHER the on-file
+    # code or its full name (COUNTRY_NLS_TERRITORY) before boosting.
+    pdf_country = _norm(pdf_addr.get("Country"))
+    if pdf_country and (
+        (cand.country and _similar(pdf_country, _norm(cand.country)) >= 0.8)
+        or (cand.country_nls_territory
+            and _similar(pdf_country, _norm(cand.country_nls_territory)) >= 0.8)
+    ):
         conf += 0.03
 
     return _Score(min(conf, 1.0), False, "")
